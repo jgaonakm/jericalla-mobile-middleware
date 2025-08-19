@@ -7,24 +7,23 @@ using RabbitMQ.Client.Events;
 
 public sealed class RabbitConsumerService : BackgroundService
 {
-    private readonly IConnectionFactory _factory;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly IOptionsMonitor<RabbitOptions> _options;
     private readonly ILogger<RabbitConsumerService> _logger;
-    private readonly ConsumerHealthState _health;
+    // private readonly ConsumerHealthState _health;
 
     private IConnection? _conn;
-    private IChannel? _ch; 
+    private IChannel? _ch;
 
     public RabbitConsumerService(
-        IConnectionFactory factory,
         IOptionsMonitor<RabbitOptions> options,
-        ILogger<RabbitConsumerService> logger,
-        ConsumerHealthState health)
+        IServiceScopeFactory scopeFactory,
+        ILogger<RabbitConsumerService> logger)
     {
-        _factory = factory;
         _options = options;
         _logger = logger;
-        _health = health;
+        _scopeFactory = scopeFactory;
+        // _health = health;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -36,8 +35,8 @@ public sealed class RabbitConsumerService : BackgroundService
             try
             {
                 EnsureConnected();
-                _health.IsConnected = true;
-                RabbitMetrics.ConnectionUp.Set(1);
+                // _health.IsConnected = true;
+                // RabbitMetrics.ConnectionUp.Set(1);
 
                 await _ch!.BasicQosAsync(0, _options.CurrentValue.Prefetch, global: false, cancellationToken: stoppingToken);
 
@@ -50,7 +49,7 @@ public sealed class RabbitConsumerService : BackgroundService
                     cancellationToken: stoppingToken);
 
                 var consumer = new AsyncEventingBasicConsumer(_ch);
-                consumer.ReceivedAsync += OnMessageAsync; 
+                consumer.ReceivedAsync += OnMessageAsync;
 
                 // Start consuming
                 var tag = await _ch.BasicConsumeAsync(
@@ -72,8 +71,8 @@ public sealed class RabbitConsumerService : BackgroundService
                 }
 
                 _logger.LogWarning("Channel or connection closed; will attempt reconnect.");
-                _health.IsConnected = false;
-                RabbitMetrics.ConnectionUp.Set(0);
+                // _health.IsConnected = false;
+                // RabbitMetrics.ConnectionUp.Set(0);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -82,8 +81,8 @@ public sealed class RabbitConsumerService : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Consumer loop error.");
-                _health.IsConnected = false;
-                RabbitMetrics.ConnectionUp.Set(0);
+                // _health.IsConnected = false;
+                // RabbitMetrics.ConnectionUp.Set(0);
             }
             finally
             {
@@ -91,7 +90,7 @@ public sealed class RabbitConsumerService : BackgroundService
             }
 
             retry++;
-            RabbitMetrics.Reconnects.Inc();
+            // RabbitMetrics.Reconnects.Inc();
             var delay = TimeSpan.FromSeconds(Math.Min(30, Math.Pow(2, Math.Min(retry, 5))));
             await Task.Delay(delay, stoppingToken);
         }
@@ -101,9 +100,9 @@ public sealed class RabbitConsumerService : BackgroundService
     private async Task OnMessageAsync(object sender, BasicDeliverEventArgs ea)
     {
         var queue = _options.CurrentValue.QueueName;
-        RabbitMetrics.MessagesReceived.WithLabels(queue).Inc();
+        // RabbitMetrics.MessagesReceived.WithLabels(queue).Inc();
 
-        RabbitMetrics.Inflight.Inc();
+        // RabbitMetrics.Inflight.Inc();
         var sw = Stopwatch.StartNew();
 
         try
@@ -111,28 +110,36 @@ public sealed class RabbitConsumerService : BackgroundService
             _logger.LogInformation("Received message from queue '{Queue}': {Message}", queue, ea.BasicProperties?.MessageId ?? "No ID");
             var text = Encoding.UTF8.GetString(ea.Body.Span);
             _logger.LogInformation("Message content: {Text}", text);
+            var reservation = System.Text.Json.JsonSerializer.Deserialize<Models.PhoneReservation>(text);
+            if (reservation == null)
+            {
+                throw new InvalidOperationException("Failed to deserialize PhoneReservation from message.");
+            }
+
+            using var scope = _scopeFactory.CreateScope();
+            var orderService = scope.ServiceProvider.GetRequiredService<IOrderService>();
+
 
             // TODO: business logic (can be awaited)
-            // e.g. await DoWorkAsync(text);
-            // ...
+            await orderService.CreateFromMessageAsync(reservation);
 
             await _ch!.BasicAckAsync(ea.DeliveryTag, multiple: false);
-            RabbitMetrics.Acked.WithLabels(queue).Inc();
-            RabbitMetrics.Processed.WithLabels(queue).Inc();
+            // RabbitMetrics.Acked.WithLabels(queue).Inc();
+            // RabbitMetrics.Processed.WithLabels(queue).Inc();
             _logger.LogInformation("Processed message from queue '{Queue}': {Message}", queue, ea.BasicProperties?.MessageId ?? "No ID");
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to process message. Nacking.");
             await _ch!.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false);
-            RabbitMetrics.Nacked.WithLabels(queue).Inc();
-            RabbitMetrics.Failures.WithLabels(queue).Inc();
+            // RabbitMetrics.Nacked.WithLabels(queue).Inc();
+            // RabbitMetrics.Failures.WithLabels(queue).Inc();
         }
         finally
         {
             sw.Stop();
-            RabbitMetrics.ProcessingSeconds.WithLabels(queue).Observe(sw.Elapsed.TotalSeconds);
-            RabbitMetrics.Inflight.Dec();
+            // RabbitMetrics.ProcessingSeconds.WithLabels(queue).Observe(sw.Elapsed.TotalSeconds);
+            // RabbitMetrics.Inflight.Dec();
         }
     }
 
@@ -142,21 +149,23 @@ public sealed class RabbitConsumerService : BackgroundService
 
         SafeCloseSync();
 
-        _conn = await _factory.CreateConnectionAsync();
-        _ch = await _conn.CreateChannelAsync(); 
+        using var scope = _scopeFactory.CreateScope();
+        var factory = scope.ServiceProvider.GetRequiredService<IConnectionFactory>();
+        _conn = await factory.CreateConnectionAsync();
+        _ch = await _conn.CreateChannelAsync();
 
         _conn.ConnectionShutdownAsync += async (_, args) =>
         {
             _logger.LogWarning("RabbitMQ connection shutdown: {ReplyText}", args.ReplyText);
-            _health.IsConnected = false;
-            RabbitMetrics.ConnectionUp.Set(0);
+            // _health.IsConnected = false;
+            // RabbitMetrics.ConnectionUp.Set(0);
             await Task.CompletedTask;
         };
         _ch.ChannelShutdownAsync += async (_, args) =>
         {
             _logger.LogWarning("RabbitMQ channel shutdown: {ReplyText}", args.ReplyText);
-            _health.IsConnected = false;
-            RabbitMetrics.ConnectionUp.Set(0);
+            // _health.IsConnected = false;
+            // RabbitMetrics.ConnectionUp.Set(0);
             await Task.CompletedTask;
         };
     }
