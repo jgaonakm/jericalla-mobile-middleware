@@ -1,0 +1,38 @@
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: mwr-order-processing
+  labels:
+    app: mwr-order-processing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mwr-order-processing
+  template:
+    metadata:
+      labels:
+        app: mwr-order-processing
+    spec:
+      containers:
+      - name: mwr-order-processing
+        image: jgaonaakm/jericalla-mobile-mwr-order-processing:1.0.4
+        imagePullPolicy: Always
+        env:
+          - name: Rabbit__Host
+            value: "rabbitmq"
+          - name: Rabbit__User
+            valueFrom:
+              secretKeyRef:
+                name: rabbitmq-secret
+                key: RABBITMQ_DEFAULT_USER
+          - name: Rabbit__Password
+            valueFrom:
+              secretKeyRef:
+                name: rabbitmq-secret
+                key: RABBITMQ_DEFAULT_PASS
+          - name: ConnectionStrings__OrdersDb
+            valueFrom:
+              secretKeyRef:
+                name: mssql-secret
+                key: MSSQL_CONN
